@@ -24,23 +24,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 核心修復：建立偽裝 Session ---
-# 這是解決 "Rate Limited" 的關鍵，偽裝成一般的瀏覽器
-def get_session():
+# --- 3. 爬蟲函數 (Goodinfo 專用) ---
+# Goodinfo 需要偽裝 Header，所以這裡我們自己建立 Session
+def get_goodinfo_session():
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://goodinfo.tw/'
     })
     return session
 
-# --- 3. 爬蟲函數 (抓 CB 資料) ---
 @st.cache_data(ttl=1800)
 def get_cb_data(stock_id):
     try:
         url = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
-        # 使用我們設定好的 Session
-        session = get_session()
+        # 使用自訂 Session 抓 Goodinfo
+        session = get_goodinfo_session()
         res = session.get(url)
         res.encoding = "utf-8"
         dfs = pd.read_html(res.text)
@@ -63,7 +62,7 @@ def card(title, value, sub="", color_class=""):
 
 # --- 5. App 主介面 ---
 st.title("📱 CB 價值精算機")
-st.caption("防擋版 v2.0")
+st.caption("v2.1 (YF Native + Goodinfo Fix)")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -74,25 +73,23 @@ with col2:
 if run_btn or stock_input:
     stock_id = stock_input.strip()
     
-    with st.spinner('連線中 (已啟用防擋機制)...'):
+    with st.spinner('連線中...'):
         try:
-            # 建立 Session
-            session = get_session()
-            
-            # A. 抓現股 (將 Session 傳入 yfinance)
+            # A. 抓現股 (讓 yfinance 自己處理 Session)
+            # 修正點：移除 session 參數，避免衝突
             ticker = f"{stock_id}.TW"
-            stock = yf.Ticker(ticker, session=session) # 關鍵修改
+            stock = yf.Ticker(ticker) 
             
-            # 嘗試獲取價格，如果失敗則試試上櫃
             try:
                 info = stock.info
                 price = info.get('currentPrice') or info.get('regularMarketPrice')
             except:
                 price = None
 
+            # 如果上市查不到，查上櫃
             if not price:
                 ticker = f"{stock_id}.TWO"
-                stock = yf.Ticker(ticker, session=session) # 關鍵修改
+                stock = yf.Ticker(ticker)
                 try:
                     info = stock.info
                     price = info.get('currentPrice') or info.get('regularMarketPrice')
@@ -102,9 +99,9 @@ if run_btn or stock_input:
             if price:
                 name = info.get('longName', stock_id)
                 st.write(f"### 📊 {name} ({stock_id})")
-                card("目前股價", f"{price} 元", "Yahoo Finance 即時數據", "highlight-blue")
+                card("目前股價", f"{price} 元", "即時/收盤價", "highlight-blue")
                 
-                # B. 抓 CB
+                # B. 抓 CB (Goodinfo)
                 cb_df = get_cb_data(stock_id)
                 
                 if cb_df is not None and not cb_df.empty:
@@ -132,12 +129,11 @@ if run_btn or stock_input:
                                  f"平價: {parity:.1f}", 
                                  "highlight-green")
                             
-                            # 簡易反推
                             target_120 = conv_price * 1.2
                             st.info(f"🚀 若希望債券漲到 120，現股需漲到: **{target_120:.1f}**")
                 else:
-                    st.warning("查無可轉債，或來源暫時封鎖")
+                    st.warning("查無可轉債 (Goodinfo 可能限制爬蟲)")
             else:
-                st.error("無法抓取股價，可能流量限制仍在冷卻中，請過 5 分鐘再試。")
+                st.error("找不到股價，請確認代號或稍後再試。")
         except Exception as e:
-            st.error(f"連線錯誤: {e}")
+            st.error(f"錯誤細節: {e}")
