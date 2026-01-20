@@ -188,4 +188,36 @@ with tab2:
                 desc = f"現股太弱。要維持得標價 {auction_min}，需 <span class='highlight'>{req_premium:.1f}%</span> 高溢價，成本線難守。"
             else:
                 status, style = "🟢 得標價穩固", "safe"
-                desc = f"現股強勢。
+                desc = f"現股強勢。得標價 {auction_min} 僅需 <span class='highlight'>{req_premium:.1f}%</span> 溢價即可維持。"
+            
+            st.markdown(f"""
+            <div class="card {style}">
+                <div class="card-title">{status}</div>
+                <div class="card-desc">{desc}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        st.caption(f"📉 競拍成本反推表 (成本: {auction_min})")
+        data = []
+        for rate in [0.10, 0.15, 0.20, 0.25]:
+            imp_s = get_implied_s(rate)
+            marker = "👈 目前" if abs(s_price - imp_s) < 5 and s_price > 0 else ""
+            data.append({"假設溢價": f"{rate*100:.0f}%", "反推現股": f"{imp_s:.1f}", "狀態": marker})
+        st.table(pd.DataFrame(data))
+
+# ==================================================
+# TAB 3: 防雷 SOP
+# ==================================================
+with tab3:
+    st.markdown("### 🛡️ 買前檢查清單")
+    with st.expander("一、條款面", expanded=True):
+        st.write("- [ ] **Put (賣回權)**：幾年賣回？價格多少？")
+        st.write("- [ ] **Call (贖回權)**：有無強迫贖回條款？")
+        st.write("- [ ] **轉換期間**：是否還在閉鎖期？")
+    with st.expander("二、交易結構"):
+        st.write("- [ ] **競拍成本**：現在價格離得標價多遠？")
+        st.write("- [ ] **首日效應**：是否為掛牌前 5 日？")
+        st.write("- [ ] **溢價率**：是否 > 20% (過熱)？")
+    with st.expander("三、價格判讀"):
+        st.write("- [ ] **Parity**：是否 > 130 (股性) 或 < 90 (債性)？")
+        st.write("- [ ] **隱含波動率**：股價沒跌 CB 跌？(小心殺溢價)")
