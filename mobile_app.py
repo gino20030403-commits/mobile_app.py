@@ -1,7 +1,7 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import requests
+import twstock
 
 # --- 1. 手機版面設定 ---
 st.set_page_config(page_title="CB 計算機", page_icon="📱", layout="centered")
@@ -24,8 +24,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 爬蟲函數 (Goodinfo 專用) ---
-# Goodinfo 需要偽裝 Header，所以這裡我們自己建立 Session
+# --- 3. 爬蟲函數 (Goodinfo 專用 - 抓 CB) ---
 def get_goodinfo_session():
     session = requests.Session()
     session.headers.update({
@@ -38,7 +37,6 @@ def get_goodinfo_session():
 def get_cb_data(stock_id):
     try:
         url = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
-        # 使用自訂 Session 抓 Goodinfo
         session = get_goodinfo_session()
         res = session.get(url)
         res.encoding = "utf-8"
@@ -50,7 +48,27 @@ def get_cb_data(stock_id):
     except:
         return None
 
-# --- 4. 輔助顯示函數 ---
+# --- 4. 新版股價函數 (使用 twstock - 抓官方即時盤) ---
+def get_stock_price(stock_id):
+    try:
+        # 抓取即時資料 (會自動搜尋上市或上櫃)
+        stock = twstock.realtime.get(stock_id)
+        
+        if stock['success']:
+            # 嘗試抓取成交價，如果沒成交(剛開盤)則抓開盤價
+            price = stock['realtime'].get('latest_trade_price')
+            
+            # 如果是 "-" (有時候暫停交易或沒數據)，改抓最佳買入價
+            if price == '-' or not price:
+                price = stock['realtime'].get('best_bid_price', [None])[0]
+                
+            if price and price != '-':
+                return float(price), stock['info']['name']
+        return None, None
+    except Exception as e:
+        return None, None
+
+# --- 5. 輔助顯示函數 ---
 def card(title, value, sub="", color_class=""):
     st.markdown(f"""
     <div class="card {color_class}">
@@ -60,9 +78,9 @@ def card(title, value, sub="", color_class=""):
     </div>
     """, unsafe_allow_html=True)
 
-# --- 5. App 主介面 ---
+# --- 6. App 主介面 ---
 st.title("📱 CB 價值精算機")
-st.caption("v2.1 (YF Native + Goodinfo Fix)")
+st.caption("v3.0 (Official TWSE Source)")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -73,67 +91,45 @@ with col2:
 if run_btn or stock_input:
     stock_id = stock_input.strip()
     
-    with st.spinner('連線中...'):
-        try:
-            # A. 抓現股 (讓 yfinance 自己處理 Session)
-            # 修正點：移除 session 參數，避免衝突
-            ticker = f"{stock_id}.TW"
-            stock = yf.Ticker(ticker) 
+    with st.spinner('正在連線證交所...'):
+        # A. 抓現股 (twstock)
+        price, stock_name = get_stock_price(stock_id)
+
+        if price:
+            st.write(f"### 📊 {stock_name} ({stock_id})")
+            card("目前股價", f"{price} 元", "來源: 證交所/櫃買中心", "highlight-blue")
             
-            try:
-                info = stock.info
-                price = info.get('currentPrice') or info.get('regularMarketPrice')
-            except:
-                price = None
+            # B. 抓 CB (Goodinfo)
+            cb_df = get_cb_data(stock_id)
+            
+            if cb_df is not None and not cb_df.empty:
+                for idx, row in cb_df.iterrows():
+                    cb_name = row['債券名稱']
+                    try:
+                        conv_price = float(str(row['轉換價格']).replace(',', ''))
+                    except:
+                        conv_price = 0
+                        
+                    if conv_price > 0:
+                        parity = (price / conv_price) * 100
+                        st.markdown("---")
+                        st.subheader(f"🔗 {cb_name}")
+                        
+                        c1, c2 = st.columns(2)
+                        with c1: st.metric("轉換價", f"{conv_price}")
+                        with c2: st.metric("平價 (Parity)", f"{parity:.2f}")
 
-            # 如果上市查不到，查上櫃
-            if not price:
-                ticker = f"{stock_id}.TWO"
-                stock = yf.Ticker(ticker)
-                try:
-                    info = stock.info
-                    price = info.get('currentPrice') or info.get('regularMarketPrice')
-                except:
-                    price = None
-
-            if price:
-                name = info.get('longName', stock_id)
-                st.write(f"### 📊 {name} ({stock_id})")
-                card("目前股價", f"{price} 元", "即時/收盤價", "highlight-blue")
-                
-                # B. 抓 CB (Goodinfo)
-                cb_df = get_cb_data(stock_id)
-                
-                if cb_df is not None and not cb_df.empty:
-                    for idx, row in cb_df.iterrows():
-                        cb_name = row['債券名稱']
-                        try:
-                            conv_price = float(str(row['轉換價格']).replace(',', ''))
-                        except:
-                            conv_price = 0
-                            
-                        if conv_price > 0:
-                            parity = (price / conv_price) * 100
-                            st.markdown("---")
-                            st.subheader(f"🔗 {cb_name}")
-                            
-                            c1, c2 = st.columns(2)
-                            with c1: st.metric("轉換價", f"{conv_price}")
-                            with c2: st.metric("平價 (Parity)", f"{parity:.2f}")
-
-                            fair_low = parity * 1.05
-                            fair_high = parity * 1.10
-                            
-                            card("合理買進區間", 
-                                 f"{fair_low:.1f} ~ {fair_high:.1f}", 
-                                 f"平價: {parity:.1f}", 
-                                 "highlight-green")
-                            
-                            target_120 = conv_price * 1.2
-                            st.info(f"🚀 若希望債券漲到 120，現股需漲到: **{target_120:.1f}**")
-                else:
-                    st.warning("查無可轉債 (Goodinfo 可能限制爬蟲)")
+                        fair_low = parity * 1.05
+                        fair_high = parity * 1.10
+                        
+                        card("合理買進區間", 
+                             f"{fair_low:.1f} ~ {fair_high:.1f}", 
+                             f"平價: {parity:.1f}", 
+                             "highlight-green")
+                        
+                        target_120 = conv_price * 1.2
+                        st.info(f"🚀 若希望債券漲到 120，現股需漲到: **{target_120:.1f}**")
             else:
-                st.error("找不到股價，請確認代號或稍後再試。")
-        except Exception as e:
-            st.error(f"錯誤細節: {e}")
+                st.warning("查無可轉債 (或 Goodinfo 連線忙碌)")
+        else:
+            st.error(f"找不到代號 {stock_id}，請確認輸入是否正確。")
