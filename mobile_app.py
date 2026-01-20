@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import twstock
 
 # --- 1. 手機版面設定 ---
 st.set_page_config(page_title="CB 計算機", page_icon="📱", layout="centered")
@@ -24,21 +23,67 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 爬蟲函數 (Goodinfo 專用 - 抓 CB) ---
-def get_goodinfo_session():
-    session = requests.Session()
-    session.headers.update({
+# --- 3. 核心爬蟲設定 (偽裝成一般人) ---
+def get_headers():
+    return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://goodinfo.tw/'
-    })
-    return session
+    }
 
+# --- 4. 抓股價 (從 Goodinfo StockDetail 頁面) ---
+# 這是這次修復的重點：不依賴 Yahoo 也不依賴證交所，直接爬網頁
+def get_price_from_goodinfo(stock_id):
+    try:
+        url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={stock_id}"
+        res = requests.get(url, headers=get_headers())
+        res.encoding = "utf-8"
+        
+        # 解析網頁中的所有表格
+        dfs = pd.read_html(res.text)
+        
+        # Goodinfo 的股價通常在最上面的表格，欄位包含 "成交價"
+        # 我們遍歷表格尋找正確的數值
+        for df in dfs:
+            # 將表格轉為字串方便搜尋，或直接檢查欄位
+            # Goodinfo 的表格排版有時是直的，有時是橫的，這裡做一個暴力搜尋
+            if "成交價" in str(df.columns) or "成交價" in df.to_string():
+                # 嘗試標準化表格
+                # 情況A: 成交價是欄位名稱 (Header)
+                if "成交價" in df.columns:
+                    price = df.iloc[0]["成交價"]
+                    return float(price), df.iloc[0].get("名稱", stock_id)
+                
+                # 情況B: 表格是 Key-Value 型 (例如第一欄是項目，第二欄是數值)
+                # 這種情況比較複雜，我們把表格轉成字典來查
+                try:
+                    # 嘗試在整個 dataframe 裡找 "成交價" 這個字，然後取它右邊或下面的值
+                    # 這裡簡化邏輯：Goodinfo 第一個大表格通常有一格叫 "成交價"
+                    # 我們直接解析 HTML 本體可能更準，但用 pandas 比較快
+                    # 針對 Goodinfo 第一張表通常如下：
+                    # [0]   [1]    [2]   [3]
+                    # 成交價  1050  昨收  1040
+                    
+                    # 搜尋所有格子
+                    for r in range(len(df)):
+                        for c in range(len(df.columns)):
+                            if str(df.iloc[r, c]).strip() == "成交價":
+                                # 找到成交價這三個字，數值通常在右邊 (c+1)
+                                price_val = df.iloc[r, c+1]
+                                return float(price_val), stock_id
+                except:
+                    continue
+                    
+        return None, None
+    except Exception as e:
+        # print(e) # 除錯用
+        return None, None
+
+# --- 5. 抓可轉債 (從 Goodinfo CB 頁面) ---
 @st.cache_data(ttl=1800)
 def get_cb_data(stock_id):
     try:
         url = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
-        session = get_goodinfo_session()
-        res = session.get(url)
+        res = requests.get(url, headers=get_headers())
         res.encoding = "utf-8"
         dfs = pd.read_html(res.text)
         for df in dfs:
@@ -48,27 +93,7 @@ def get_cb_data(stock_id):
     except:
         return None
 
-# --- 4. 新版股價函數 (使用 twstock - 抓官方即時盤) ---
-def get_stock_price(stock_id):
-    try:
-        # 抓取即時資料 (會自動搜尋上市或上櫃)
-        stock = twstock.realtime.get(stock_id)
-        
-        if stock['success']:
-            # 嘗試抓取成交價，如果沒成交(剛開盤)則抓開盤價
-            price = stock['realtime'].get('latest_trade_price')
-            
-            # 如果是 "-" (有時候暫停交易或沒數據)，改抓最佳買入價
-            if price == '-' or not price:
-                price = stock['realtime'].get('best_bid_price', [None])[0]
-                
-            if price and price != '-':
-                return float(price), stock['info']['name']
-        return None, None
-    except Exception as e:
-        return None, None
-
-# --- 5. 輔助顯示函數 ---
+# --- 6. 輔助顯示函數 ---
 def card(title, value, sub="", color_class=""):
     st.markdown(f"""
     <div class="card {color_class}">
@@ -78,9 +103,9 @@ def card(title, value, sub="", color_class=""):
     </div>
     """, unsafe_allow_html=True)
 
-# --- 6. App 主介面 ---
+# --- 7. App 主介面 ---
 st.title("📱 CB 價值精算機")
-st.caption("v3.0 (Official TWSE Source)")
+st.caption("v4.0 (All-Goodinfo Version)")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -91,15 +116,15 @@ with col2:
 if run_btn or stock_input:
     stock_id = stock_input.strip()
     
-    with st.spinner('正在連線證交所...'):
-        # A. 抓現股 (twstock)
-        price, stock_name = get_stock_price(stock_id)
+    with st.spinner('正在從 Goodinfo 抓取資料...'):
+        # 1. 抓現股 (Goodinfo)
+        price, stock_name = get_price_from_goodinfo(stock_id)
 
         if price:
             st.write(f"### 📊 {stock_name} ({stock_id})")
-            card("目前股價", f"{price} 元", "來源: 證交所/櫃買中心", "highlight-blue")
+            card("目前股價", f"{price} 元", "來源: Goodinfo", "highlight-blue")
             
-            # B. 抓 CB (Goodinfo)
+            # 2. 抓 CB (Goodinfo)
             cb_df = get_cb_data(stock_id)
             
             if cb_df is not None and not cb_df.empty:
@@ -130,6 +155,8 @@ if run_btn or stock_input:
                         target_120 = conv_price * 1.2
                         st.info(f"🚀 若希望債券漲到 120，現股需漲到: **{target_120:.1f}**")
             else:
-                st.warning("查無可轉債 (或 Goodinfo 連線忙碌)")
+                st.warning("此股無近期可轉債，或資料讀取失敗")
         else:
-            st.error(f"找不到代號 {stock_id}，請確認輸入是否正確。")
+            # 如果還是失敗，顯示詳細建議
+            st.error(f"找不到代號 {stock_id} 的股價。")
+            st.info("💡 提示：請確認代號正確。若確定正確，可能是 Goodinfo 暫時阻擋了頻繁查詢，請過幾分鐘再試。")
