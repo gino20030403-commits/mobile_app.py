@@ -22,49 +22,36 @@ st.markdown("""
     .card-sub { font-size: 13px; color: #666; margin-top: 4px; }
     .highlight-blue { border-left: 5px solid #2196f3; }
     .highlight-green { border-left: 5px solid #4caf50; }
+    .highlight-orange { border-left: 5px solid #ff9800; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 3. 核心功能：多重來源抓股價 (Smart Fetch) ---
 def get_price_smart(stock_id):
-    logs = [] # 紀錄嘗試過程
+    logs = [] 
     
-    # === 來源 A: Yahoo Finance (使用 history 函數，最穩) ===
+    # === A: Yahoo Finance (History) ===
     try:
-        # 先試上市
         t = yf.Ticker(f"{stock_id}.TW")
         hist = t.history(period="1d")
-        if not hist.empty:
-            price = hist['Close'].iloc[-1]
-            return float(price), "Yahoo Finance (TW)"
+        if not hist.empty: return float(hist['Close'].iloc[-1]), "Yahoo (TW)"
         
-        # 再試上櫃
         t = yf.Ticker(f"{stock_id}.TWO")
         hist = t.history(period="1d")
-        if not hist.empty:
-            price = hist['Close'].iloc[-1]
-            return float(price), "Yahoo Finance (TWO)"
-        
-        logs.append("Yahoo: 無資料")
-    except Exception as e:
-        logs.append(f"Yahoo Error: {str(e)}")
+        if not hist.empty: return float(hist['Close'].iloc[-1]), "Yahoo (TWO)"
+    except Exception as e: logs.append(f"Yahoo: {e}")
 
-    # === 來源 B: twstock (證交所官方 API) ===
+    # === B: twstock (證交所) ===
     try:
         stock = twstock.realtime.get(stock_id)
         if stock['success']:
             price = stock['realtime'].get('latest_trade_price')
-            # 處理沒成交價的情況 (改抓買進價)
             if price == '-' or not price:
                 price = stock['realtime'].get('best_bid_price', [None])[0]
-            
-            if price and price != '-':
-                return float(price), "證交所/櫃買中心"
-        logs.append("twstock: 抓取失敗")
-    except Exception as e:
-        logs.append(f"twstock Error: {str(e)}")
+            if price and price != '-': return float(price), "證交所/櫃買"
+    except Exception as e: logs.append(f"Twstock: {e}")
 
-    # === 來源 C: Goodinfo (爬蟲，最後手段) ===
+    # === C: Goodinfo (備用) ===
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={stock_id}"
@@ -72,24 +59,13 @@ def get_price_smart(stock_id):
         res.encoding = "utf-8"
         dfs = pd.read_html(res.text)
         for df in dfs:
-            if "成交價" in df.columns:
-                price = df.iloc[0]["成交價"]
-                return float(price), "Goodinfo"
-            # 暴力搜尋表格內容
-            if "成交價" in df.to_string():
-                # 這裡省略複雜解析，只要上面兩種都失敗，通常 Goodinfo 也會擋 IP
-                pass
-        logs.append("Goodinfo: 解析失敗")
-    except Exception as e:
-        logs.append(f"Goodinfo Error: {str(e)}")
+            if "成交價" in df.columns: return float(df.iloc[0]["成交價"]), "Goodinfo"
+    except: pass
 
-    # 全部失敗
-    print(logs) # 在後台印出錯誤日誌方便除錯
     return None, None
 
-# --- 4. 抓可轉債 (維持 Goodinfo) ---
-@st.cache_data(ttl=1800)
-def get_cb_data(stock_id):
+# --- 4. 抓可轉債 (雙引擎：Goodinfo + HiStock) ---
+def get_cb_from_goodinfo(stock_id):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         url = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
@@ -98,10 +74,44 @@ def get_cb_data(stock_id):
         dfs = pd.read_html(res.text)
         for df in dfs:
             if "轉換價格" in df.columns:
-                return df[['債券名稱', '轉換價格']].head(3)
-        return None
+                return df[['債券名稱', '轉換價格']].head(3), "Goodinfo"
+        return None, None
     except:
-        return None
+        return None, None
+
+def get_cb_from_histock(stock_id):
+    # HiStock 嗨投資 - 結構比較簡單，通常較少擋 IP
+    try:
+        url = f"https://histock.tw/stock/{stock_id}/%E5%8F%AF%E8%BD%89%E5%82%B5" # /可轉債
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=5)
+        # HiStock 有時不需要特定 encoding，pandas 會自動處理
+        
+        dfs = pd.read_html(res.text)
+        # HiStock 的表格通常包含 "名稱", "代碼", "轉換價"
+        for df in dfs:
+            if "名稱" in df.columns and "轉換價" in df.columns:
+                # 重新命名以符合我們的格式
+                df = df.rename(columns={"名稱": "債券名稱", "轉換價": "轉換價格"})
+                # 過濾掉已經下市或無效的 (通常HiStock只列出有效的)
+                return df[['債券名稱', '轉換價格']].head(3), "HiStock"
+        return None, None
+    except:
+        return None, None
+
+@st.cache_data(ttl=1800)
+def get_cb_data_smart(stock_id):
+    # 策略 1: 先試 Goodinfo (資料最詳細)
+    df, source = get_cb_from_goodinfo(stock_id)
+    if df is not None and not df.empty:
+        return df, source
+        
+    # 策略 2: 如果失敗，試試 HiStock (防擋能力較強)
+    df, source = get_cb_from_histock(stock_id)
+    if df is not None and not df.empty:
+        return df, source
+        
+    return None, None
 
 # --- 5. 輔助顯示函數 ---
 def card(title, value, sub="", color_class=""):
@@ -115,41 +125,42 @@ def card(title, value, sub="", color_class=""):
 
 # --- 6. App 主介面 ---
 st.title("📱 CB 價值精算機")
-st.caption("v5.0 (Smart Multi-Source)")
+st.caption("v6.0 (Dual-Engine CB Fetch)")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    stock_input = st.text_input("股票代號", placeholder="如: 2467", label_visibility="collapsed")
+    stock_input = st.text_input("股票代號", placeholder="如: 3715", label_visibility="collapsed")
 with col2:
     run_btn = st.button("計算")
 
 if run_btn or stock_input:
     stock_id = stock_input.strip()
     
-    # 顯示進度條，因為會嘗試多個來源
-    with st.spinner(f'正在多方搜尋 {stock_id} 股價...'):
+    with st.spinner(f'正在為您掃描 {stock_id} ...'):
         
-        # 1. 智慧抓股價
-        price, source = get_price_smart(stock_id)
+        # 1. 抓股價
+        price, p_source = get_price_smart(stock_id)
 
         if price:
+            # 決定顏色
+            p_color = "highlight-blue"
+            if "Yahoo" not in p_source and "證交所" not in p_source: p_color = "highlight-orange"
+            
             st.write(f"### 📊 {stock_id} 股價資訊")
-            # 根據不同來源給不同顏色，讓你知道是誰立功了
-            badge_color = "highlight-blue"
-            if "Yahoo" in source: badge_color = "highlight-blue" # 藍色
-            elif "證交所" in source: badge_color = "highlight-green" # 綠色
-            elif "Goodinfo" in source: badge_color = "highlight-orange" # 橘色
+            card("目前股價", f"{price} 元", f"來源: {p_source}", p_color)
             
-            card("目前股價", f"{price} 元", f"資料來源: {source}", badge_color)
-            
-            # 2. 抓 CB
-            cb_df = get_cb_data(stock_id)
+            # 2. 抓 CB (智慧雙引擎)
+            cb_df, cb_source = get_cb_data_smart(stock_id)
             
             if cb_df is not None and not cb_df.empty:
+                st.info(f"✅ 可轉債資料來源：{cb_source}")
+                
                 for idx, row in cb_df.iterrows():
                     cb_name = row['債券名稱']
                     try:
-                        conv_price = float(str(row['轉換價格']).replace(',', ''))
+                        # 清理數據 (有些網站會有 * 或 ,)
+                        raw_price = str(row['轉換價格']).replace(',', '').replace('*', '')
+                        conv_price = float(raw_price)
                     except:
                         conv_price = 0
                         
@@ -171,14 +182,13 @@ if run_btn or stock_input:
                              "highlight-green")
                         
                         target_120 = conv_price * 1.2
-                        st.info(f"🚀 若希望債券漲到 120，現股需漲到: **{target_120:.1f}**")
+                        st.markdown(f"""
+                        <div style="background-color:#e8f5e9; padding:10px; border-radius:5px; font-size:14px;">
+                        🚀 目標債價 <b>120</b> 元 ➔ 現股需漲至 <b>{target_120:.1f}</b>
+                        </div>
+                        """, unsafe_allow_html=True)
             else:
-                st.warning("查無可轉債 (或資料讀取失敗)")
+                st.warning("查無可轉債 (Goodinfo 與 HiStock 皆無資料或連線失敗)")
+                st.markdown("[👉 點此直接去 HiStock 確認](https://histock.tw/stock/" + stock_id + "/%E5%8F%AF%E8%BD%89%E5%82%B5)")
         else:
-            st.error(f"❌ 找不到代號 {stock_id}。")
-            st.markdown("""
-            **可能原因：**
-            1. 代號輸入錯誤。
-            2. 雲端主機目前同時被 Yahoo、證交所與 Goodinfo 封鎖 (機率較低，但可能發生)。
-            3. 請過 5 分鐘後再試一次。
-            """)
+            st.error(f"❌ 找不到 {stock_id} 的股價，請稍後再試。")
