@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
-import requests
-import re
 
 # --- 1. 版面設定 ---
-st.set_page_config(page_title="CB 深度鑑識", page_icon="🧐", layout="centered")
+st.set_page_config(page_title="CB 極速操盤", page_icon="⚡", layout="centered")
 
 # --- 2. CSS 美化 ---
 st.markdown("""
@@ -20,7 +18,6 @@ st.markdown("""
     
     /* 風險分析區塊 */
     .risk-box { background-color: #f1f8e9; padding: 15px; border-radius: 8px; border-left: 5px solid #33691e; margin-top: 10px; text-align: left;}
-    .risk-title { font-weight: bold; color: #33691e; font-size: 16px; margin-bottom: 5px; }
     
     /* 顏色定義 */
     .danger { background-color: #ffebee; border-color: #ef5350; color: #c62828; }
@@ -33,66 +30,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧐 CB 深度鑑識系統")
+st.title("⚡ CB 極速操盤系統")
 
-# --- 3. 爬蟲輔助 ---
-def fetch_cb_data(text_input):
-    code_match = re.search(r"\d{4,6}", text_input)
-    if not code_match: return 0.0
-    code = code_match.group(0)
-    try:
-        url = f"https://histock.tw/stock/{code}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=3)
-        if res.status_code == 200:
-            dfs = pd.read_html(res.text)
-            for df in dfs:
-                row_text = df.to_string()
-                if "轉換價" in row_text:
-                    nums = re.findall(r"\d+\.?\d*", row_text)
-                    for n in nums:
-                        f_n = float(n)
-                        if 10 <= f_n <= 2000: return f_n
-    except: return 0.0
-    return 0.0
-
-# --- 4. 輸入區 ---
+# --- 3. 參數設定區 (純手動) ---
 with st.container():
-    st.markdown("### 1️⃣ 設定參數")
-    col_input, col_btn = st.columns([3, 1])
-    with col_input:
-        cb_text = st.text_input("代號或名稱", placeholder="例: 64633 / 志聖三", key="cb_input_key")
-    with col_btn:
-        st.write("") 
-        st.write("") 
-        auto_fill = st.button("🪄 試抓")
-
-    if 'k_val' not in st.session_state: st.session_state['k_val'] = 0.0
-    if 'auc_val' not in st.session_state: st.session_state['auc_val'] = 100.0
-
-    if auto_fill and cb_text:
-        with st.spinner("搜尋中..."):
-            fetched_price = fetch_cb_data(cb_text)
-            if fetched_price > 0:
-                st.session_state['k_val'] = fetched_price
-                st.success(f"✅ 抓到了！K：{fetched_price}")
-            else:
-                st.warning("⚠️ 查無資料，請手動輸入")
+    st.markdown("### 1️⃣ 設定參數 (DNA)")
+    
+    # 這裡只做純紀錄用，方便你截圖或辨識
+    cb_name = st.text_input("代號或名稱 (選填)", placeholder="例: 志聖三 / 64633")
 
     c1, c2 = st.columns(2)
-    conv_price = c1.number_input("1. 轉換價格 (K)", min_value=0.0, step=0.1, key='k_val')
-    auction_min = c2.number_input("2. 最低得標/成本", min_value=0.0, step=0.1, key='auc_val')
+    # 預設值保留，方便測試
+    conv_price = c1.number_input("1. 轉換價格 (K)", min_value=0.0, step=0.1, value=246.6)
+    auction_min = c2.number_input("2. 最低得標/成本", min_value=0.0, step=0.1, value=121.8)
 
-st.markdown("### 2️⃣ 盤中戰場")
+# --- 4. 盤中戰場 ---
+st.markdown("### 2️⃣ 盤中輸入 (即時)")
 c3, c4 = st.columns(2)
 s_price = c3.number_input("現股股價 (S)", value=0.0, step=0.5)
 cb_price = c4.number_input("CB 成交價 (P)", value=0.0, step=0.5)
 
 # --- 5. 核心分頁 ---
-tab1, tab2, tab3 = st.tabs(["⚔️ 深度戰情室", "⚖️ 競拍反推", "📋 防雷SOP"])
+tab1, tab2, tab3 = st.tabs(["⚔️ 深度鑑識", "⚖️ 競拍反推", "📋 防雷SOP"])
 
 # ==================================================
-# TAB 1: 深度戰情室 (你的核心邏輯)
+# TAB 1: 深度戰情室 (v22 邏輯)
 # ==================================================
 with tab1:
     if conv_price > 0 and s_price > 0 and cb_price > 0:
@@ -101,7 +63,7 @@ with tab1:
         premium = ((cb_price - parity) / parity) * 100
         implied_s = (cb_price / 100) * conv_price  # 隱含股價
         
-        # 你的判斷邏輯
+        # 判斷邏輯
         if premium >= 20:
             status = "🔴 市場過熱 (High Premium)"
             style = "danger"
@@ -147,7 +109,7 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-        # 隱含劇本分析 (Implied Script)
+        # 隱含劇本分析
         st.markdown("#### 🎬 市場正在押注的劇本")
         st.info(f"""
         CB 成交在 **{cb_price}** 元 
@@ -156,15 +118,10 @@ with tab1:
         (目前現股 {s_price}，距離劇本還有 {implied_s - s_price:+.1f} 元的想像空間)
         """)
 
-        # 風險歸屬分析 (Risk Attribution)
+        # 風險歸屬
         st.markdown("#### 🔍 深度解讀：誰在承擔風險？")
-        st.markdown(f"""
-        <div class="risk-box">
-            {risk_who}
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"""<div class="risk-box">{risk_who}</div>""", unsafe_allow_html=True)
         
-        # 你的觀察指標
         if premium > 25:
              st.caption("👀 **觀察重點**：若 Premium 開始從 30% 掉到 15% 以下，且現股沒崩，代表短線風險正在下降 (泡沫擠乾)。")
 
@@ -172,7 +129,7 @@ with tab1:
         st.info("👈 請輸入現股與 CB 價格")
 
 # ==================================================
-# TAB 2: 競拍反推 (保留 v18)
+# TAB 2: 競拍反推
 # ==================================================
 with tab2:
     if conv_price > 0 and auction_min > 0:
