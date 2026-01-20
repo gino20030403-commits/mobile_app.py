@@ -19,29 +19,29 @@ st.markdown("""
     }
     .card-header { font-size: 14px; color: #888; margin-bottom: 4px; }
     .card-value { font-size: 24px; font-weight: 700; color: #333; }
-    .card-sub { font-size: 13px; color: #666; margin-top: 4px; }
     .highlight-blue { border-left: 5px solid #2196f3; }
     .highlight-green { border-left: 5px solid #4caf50; }
-    .highlight-orange { border-left: 5px solid #ff9800; }
+    .fallback-btn {
+        display: inline-block; text-decoration: none; background-color: #f1f3f4; 
+        color: #333; padding: 10px 15px; border-radius: 8px; margin: 5px 0; 
+        font-weight: bold; border: 1px solid #ccc; width: 100%; text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 核心功能：多重來源抓股價 (Smart Fetch) ---
+# --- 3. 核心功能：多重來源抓股價 ---
 def get_price_smart(stock_id):
-    logs = [] 
-    
-    # === A: Yahoo Finance (History) ===
+    # Yahoo
     try:
         t = yf.Ticker(f"{stock_id}.TW")
         hist = t.history(period="1d")
         if not hist.empty: return float(hist['Close'].iloc[-1]), "Yahoo (TW)"
-        
         t = yf.Ticker(f"{stock_id}.TWO")
         hist = t.history(period="1d")
         if not hist.empty: return float(hist['Close'].iloc[-1]), "Yahoo (TWO)"
-    except Exception as e: logs.append(f"Yahoo: {e}")
+    except: pass
 
-    # === B: twstock (證交所) ===
+    # twstock
     try:
         stock = twstock.realtime.get(stock_id)
         if stock['success']:
@@ -49,13 +49,13 @@ def get_price_smart(stock_id):
             if price == '-' or not price:
                 price = stock['realtime'].get('best_bid_price', [None])[0]
             if price and price != '-': return float(price), "證交所/櫃買"
-    except Exception as e: logs.append(f"Twstock: {e}")
+    except: pass
 
-    # === C: Goodinfo (備用) ===
+    # Goodinfo (最後手段)
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={stock_id}"
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=3)
         res.encoding = "utf-8"
         dfs = pd.read_html(res.text)
         for df in dfs:
@@ -64,54 +64,50 @@ def get_price_smart(stock_id):
 
     return None, None
 
-# --- 4. 抓可轉債 (雙引擎：Goodinfo + HiStock) ---
-def get_cb_from_goodinfo(stock_id):
+# --- 4. 抓可轉債 (附帶狀態回傳) ---
+def get_cb_data_robust(stock_id):
+    # 1. 嘗試 Goodinfo
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         url = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
-        res = requests.get(url, headers=headers, timeout=5)
-        res.encoding = "utf-8"
-        dfs = pd.read_html(res.text)
-        for df in dfs:
-            if "轉換價格" in df.columns:
-                return df[['債券名稱', '轉換價格']].head(3), "Goodinfo"
-        return None, None
-    except:
-        return None, None
+        res = requests.get(url, headers=headers, timeout=3)
+        if res.status_code == 200:
+            dfs = pd.read_html(res.text)
+            for df in dfs:
+                if "轉換價格" in df.columns:
+                    return df[['債券名稱', '轉換價格']].head(3), "Goodinfo", None
+    except Exception as e:
+        pass # 失敗就繼續
 
-def get_cb_from_histock(stock_id):
-    # HiStock 嗨投資 - 結構比較簡單，通常較少擋 IP
+    # 2. 嘗試 HiStock
     try:
-        url = f"https://histock.tw/stock/{stock_id}/%E5%8F%AF%E8%BD%89%E5%82%B5" # /可轉債
         headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
-        # HiStock 有時不需要特定 encoding，pandas 會自動處理
-        
-        dfs = pd.read_html(res.text)
-        # HiStock 的表格通常包含 "名稱", "代碼", "轉換價"
-        for df in dfs:
-            if "名稱" in df.columns and "轉換價" in df.columns:
-                # 重新命名以符合我們的格式
-                df = df.rename(columns={"名稱": "債券名稱", "轉換價": "轉換價格"})
-                # 過濾掉已經下市或無效的 (通常HiStock只列出有效的)
-                return df[['債券名稱', '轉換價格']].head(3), "HiStock"
-        return None, None
-    except:
-        return None, None
+        url = f"https://histock.tw/stock/{stock_id}/%E5%8F%AF%E8%BD%89%E5%82%B5"
+        res = requests.get(url, headers=headers, timeout=3)
+        if res.status_code == 200:
+            dfs = pd.read_html(res.text)
+            for df in dfs:
+                # HiStock 欄位可能有變，嘗試模糊搜尋
+                if "轉換價" in df.columns or "名稱" in df.columns:
+                    df = df.rename(columns={"名稱": "債券名稱", "轉換價": "轉換價格", "代碼": "代號"})
+                    if "債券名稱" in df.columns and "轉換價格" in df.columns:
+                         return df[['債券名稱', '轉換價格']].head(3), "HiStock", None
+    except Exception as e:
+        pass
 
-@st.cache_data(ttl=1800)
-def get_cb_data_smart(stock_id):
-    # 策略 1: 先試 Goodinfo (資料最詳細)
-    df, source = get_cb_from_goodinfo(stock_id)
-    if df is not None and not df.empty:
-        return df, source
-        
-    # 策略 2: 如果失敗，試試 HiStock (防擋能力較強)
-    df, source = get_cb_from_histock(stock_id)
-    if df is not None and not df.empty:
-        return df, source
-        
-    return None, None
+    # 3. 嘗試 MoneyDJ (新來源)
+    try:
+        url = f"https://www.moneydj.com/KMDJ/Common/ListBond.aspx?a={stock_id}"
+        res = requests.get(url, timeout=3)
+        if res.status_code == 200:
+            dfs = pd.read_html(res.text)
+            for df in dfs:
+                if "轉換價格" in df.columns:
+                     return df[['債券名稱', '轉換價格']].head(3), "MoneyDJ", None
+    except:
+        pass
+
+    return None, None, "所有來源皆連線失敗 (IP被擋)"
 
 # --- 5. 輔助顯示函數 ---
 def card(title, value, sub="", color_class=""):
@@ -119,13 +115,13 @@ def card(title, value, sub="", color_class=""):
     <div class="card {color_class}">
         <div class="card-header">{title}</div>
         <div class="card-value">{value}</div>
-        <div class="card-sub">{sub}</div>
+        <div style="font-size:13px; color:#666;">{sub}</div>
     </div>
     """, unsafe_allow_html=True)
 
 # --- 6. App 主介面 ---
 st.title("📱 CB 價值精算機")
-st.caption("v6.0 (Dual-Engine CB Fetch)")
+st.caption("v7.0 (Resilient Fallback Mode)")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -136,33 +132,27 @@ with col2:
 if run_btn or stock_input:
     stock_id = stock_input.strip()
     
-    with st.spinner(f'正在為您掃描 {stock_id} ...'):
-        
-        # 1. 抓股價
+    with st.spinner(f'搜尋中...'):
+        # A. 抓股價
         price, p_source = get_price_smart(stock_id)
 
         if price:
-            # 決定顏色
-            p_color = "highlight-blue"
-            if "Yahoo" not in p_source and "證交所" not in p_source: p_color = "highlight-orange"
-            
             st.write(f"### 📊 {stock_id} 股價資訊")
-            card("目前股價", f"{price} 元", f"來源: {p_source}", p_color)
+            # 股價卡片
+            card("目前股價", f"{price} 元", f"來源: {p_source}", "highlight-blue")
             
-            # 2. 抓 CB (智慧雙引擎)
-            cb_df, cb_source = get_cb_data_smart(stock_id)
+            # B. 抓 CB
+            cb_df, cb_source, error_msg = get_cb_data_robust(stock_id)
             
             if cb_df is not None and not cb_df.empty:
-                st.info(f"✅ 可轉債資料來源：{cb_source}")
-                
+                # === 成功抓取 ===
+                st.success(f"✅ 資料來源：{cb_source}")
                 for idx, row in cb_df.iterrows():
                     cb_name = row['債券名稱']
                     try:
-                        # 清理數據 (有些網站會有 * 或 ,)
-                        raw_price = str(row['轉換價格']).replace(',', '').replace('*', '')
-                        conv_price = float(raw_price)
-                    except:
-                        conv_price = 0
+                        raw_val = str(row['轉換價格']).replace(',', '').replace('*', '')
+                        conv_price = float(raw_val)
+                    except: conv_price = 0
                         
                     if conv_price > 0:
                         parity = (price / conv_price) * 100
@@ -171,24 +161,36 @@ if run_btn or stock_input:
                         
                         c1, c2 = st.columns(2)
                         with c1: st.metric("轉換價", f"{conv_price}")
-                        with c2: st.metric("平價 (Parity)", f"{parity:.2f}")
+                        with c2: st.metric("平價", f"{parity:.2f}")
 
                         fair_low = parity * 1.05
-                        fair_high = parity * 1.10
-                        
-                        card("合理買進區間", 
-                             f"{fair_low:.1f} ~ {fair_high:.1f}", 
-                             f"平價: {parity:.1f}", 
-                             "highlight-green")
-                        
-                        target_120 = conv_price * 1.2
-                        st.markdown(f"""
-                        <div style="background-color:#e8f5e9; padding:10px; border-radius:5px; font-size:14px;">
-                        🚀 目標債價 <b>120</b> 元 ➔ 現股需漲至 <b>{target_120:.1f}</b>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        card("合理買進區間", f"{fair_low:.1f} 起", f"Parity: {parity:.1f}", "highlight-green")
             else:
-                st.warning("查無可轉債 (Goodinfo 與 HiStock 皆無資料或連線失敗)")
-                st.markdown("[👉 點此直接去 HiStock 確認](https://histock.tw/stock/" + stock_id + "/%E5%8F%AF%E8%BD%89%E5%82%B5)")
+                # === 抓取失敗 (啟用備用方案) ===
+                st.warning("⚠️ 自動抓取失敗，可能是雲端 IP 被暫時封鎖。")
+                
+                st.markdown("### 👇 點擊下方按鈕直接查看 (最穩)")
+                
+                # 產生直接連結 (這是最保險的，絕對能看到資料)
+                url_histock = f"https://histock.tw/stock/{stock_id}/%E5%8F%AF%E8%BD%89%E5%82%B5"
+                url_goodinfo = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
+                url_moneydj = f"https://www.moneydj.com/KMDJ/Common/ListBond.aspx?a={stock_id}"
+
+                st.markdown(f"""
+                <a href="{url_histock}" target="_blank" class="fallback-btn">👉 開啟 HiStock (嗨投資)</a>
+                <a href="{url_goodinfo}" target="_blank" class="fallback-btn">👉 開啟 Goodinfo</a>
+                <a href="{url_moneydj}" target="_blank" class="fallback-btn">👉 開啟 MoneyDJ</a>
+                """, unsafe_allow_html=True)
+                
+                st.info("💡 提示：點開後找「轉換價格」，輸入到下方手動計算：")
+                
+                # 手動計算器 (讓 App 即使沒資料也有用)
+                with st.expander("🧮 手動輸入轉換價來計算"):
+                    user_conv = st.number_input("輸入您看到的轉換價", min_value=0.0, step=0.1)
+                    if user_conv > 0:
+                        user_parity = (price / user_conv) * 100
+                        st.metric("即時平價 (Parity)", f"{user_parity:.2f}")
+                        st.write(f"合理買進價約：{user_parity*1.05:.1f}")
+
         else:
-            st.error(f"❌ 找不到 {stock_id} 的股價，請稍後再試。")
+            st.error(f"❌ 找不到代號 {stock_id}，請確認是否正確。")
