@@ -1,174 +1,97 @@
 import streamlit as st
 import pandas as pd
-import requests
-import yfinance as yf
-from datetime import datetime
 
-# --- 1. 手機版面設定 ---
-st.set_page_config(page_title="CB 計算機", page_icon="📱", layout="centered")
+# --- 1. 版面設定 ---
+st.set_page_config(page_title="萬用戰情室", page_icon="🛡️", layout="centered")
 
-# --- 2. CSS 手機優化 ---
+# --- 2. CSS 美化 (戰情室風格) ---
 st.markdown("""
 <style>
-    .stApp { font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-    .stTextInput input { font-size: 18px; padding: 10px; }
-    .stButton button { width: 100%; font-size: 18px; font-weight: bold; padding: 10px; }
-    .card {
-        background-color: #ffffff; padding: 15px; border-radius: 12px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.08); margin-bottom: 12px; border: 1px solid #f0f0f0;
-    }
-    .card-header { font-size: 14px; color: #888; margin-bottom: 4px; }
-    .card-value { font-size: 28px; font-weight: 800; color: #333; }
-    .tag { font-size: 12px; padding: 3px 8px; border-radius: 4px; color: white; display: inline-block; margin-left: 5px; vertical-align: middle;}
-    .tag-tw { background-color: #007bff; } /* 上市藍 */
-    .tag-two { background-color: #28a745; } /* 上櫃綠 */
+    .stApp { font-family: -apple-system, sans-serif; }
+    .stNumberInput input { font-size: 20px !important; }
+    .stTextInput input { font-size: 20px !important; }
     
-    .fallback-btn {
-        display: block; text-decoration: none; background-color: #f8f9fa; 
-        color: #333; padding: 12px; border-radius: 8px; margin: 8px 0; 
-        font-weight: bold; border: 1px solid #ddd; text-align: center;
+    /* 訊號燈卡片 */
+    .signal-card {
+        padding: 15px; border-radius: 10px; margin-bottom: 15px;
+        text-align: center; border-width: 2px; border-style: solid;
     }
+    .signal-title { font-size: 22px; font-weight: 900; margin-bottom: 5px; }
+    .signal-desc { font-size: 15px; opacity: 0.9; text-align: left; margin-top: 10px; }
+    
+    /* 顏色定義 */
+    .danger { background-color: #ffebee; border-color: #ef5350; color: #c62828; }
+    .warning { background-color: #fff3e0; border-color: #ffb74d; color: #ef6c00; }
+    .safe { background-color: #e8f5e9; border-color: #66bb6a; color: #2e7d32; }
+    .neutral { background-color: #f5f5f5; border-color: #bdbdbd; color: #616161; }
+
+    /* 數據強調 */
+    .big-num { font-size: 24px; font-weight: bold; }
+    .small-label { font-size: 12px; color: #666; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 強力股價搜尋 (專治上櫃抓不到) ---
-def get_price_robust(stock_id):
-    # 策略 A: 先假設它是上櫃 (.TWO) - 因為你反應上櫃抓不到，我們優先測
-    try:
-        t = yf.Ticker(f"{stock_id}.TWO")
-        hist = t.history(period="1d")
-        if not hist.empty:
-            price = float(hist['Close'].iloc[-1])
-            return price, "TWO" # 回傳標記：這是上櫃
-    except: pass
+st.title("🛡️ CB 萬用戰情室")
+st.caption("通用版：適用新債掛牌 / 舊債套利")
 
-    # 策略 B: 如果上櫃沒資料，再試上市 (.TW)
-    try:
-        t = yf.Ticker(f"{stock_id}.TW")
-        hist = t.history(period="1d")
-        if not hist.empty:
-            price = float(hist['Close'].iloc[-1])
-            return price, "TW" # 回傳標記：這是上市
-    except: pass
+# --- 3. 戰前準備 (設定參數) ---
+# 這裡讓使用者輸入該檔 CB 的「DNA」
+with st.expander("⚙️ 步驟一：輸入債券參數 (DNA)", expanded=True):
+    stock_name = st.text_input("債券名稱 (選填)", placeholder="例如：世紀鋼一")
     
-    return None, None
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        conv_price = st.number_input("1. 轉換價格 (K)", min_value=0.0, value=0.0, step=0.1, help="查閱公開說明書或 App")
+    with col_p2:
+        # 如果是舊債，可以輸入 100；如果是新掛牌，輸入競拍最低得標價
+        auction_cost = st.number_input("2. 大戶成本/得標價", min_value=0.0, value=100.0, step=0.1, help="新債請填競拍最低價，舊債可填 100 或市場平均成本")
 
-# --- 4. 抓可轉債 (爬蟲 + 手動備案) ---
-def get_cb_data(stock_id):
-    # 嘗試 Goodinfo
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        url = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
-        res = requests.get(url, headers=headers, timeout=4)
-        if res.status_code == 200:
-            dfs = pd.read_html(res.text)
-            for df in dfs:
-                if "轉換價格" in df.columns:
-                    return df[['債券名稱', '轉換價格']].head(3), "Goodinfo"
-    except: pass
-
-    # 嘗試 HiStock (上櫃股這裡通常比較穩)
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://histock.tw/stock/{stock_id}/%E5%8F%AF%E8%BD%89%E5%82%B5"
-        res = requests.get(url, headers=headers, timeout=4)
-        if res.status_code == 200:
-            dfs = pd.read_html(res.text)
-            for df in dfs:
-                if "名稱" in df.columns and "轉換價" in df.columns:
-                     df = df.rename(columns={"名稱": "債券名稱", "轉換價": "轉換價格"})
-                     return df[['債券名稱', '轉換價格']].head(3), "HiStock"
-    except: pass
-
-    return None, None
-
-# --- 5. 輔助顯示 ---
-def card(title, value, sub="", color_border=""):
-    border_style = f"border-left: 5px solid {color_border};" if color_border else ""
-    st.markdown(f"""
-    <div class="card" style="{border_style}">
-        <div class="card-header">{title}</div>
-        <div class="card-value">{value}</div>
-        <div style="font-size:13px; color:#666;">{sub}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-# --- 6. App 主介面 ---
-st.title("📱 CB 價值精算機")
-st.caption("v8.0 (OTC/上櫃 優化版)")
-
-col1, col2 = st.columns([3, 1])
+# --- 4. 戰場輸入區 (盤中動態) ---
+st.markdown("### ⚔️ 步驟二：盤中輸入即時價格")
+col1, col2 = st.columns(2)
 with col1:
-    stock_input = st.text_input("股票代號", placeholder="如: 3293, 8069", label_visibility="collapsed")
+    s_price = st.number_input("現股股價 (S)", min_value=0.0, value=0.0, step=0.5)
 with col2:
-    run_btn = st.button("查詢")
+    cb_price = st.number_input("CB 成交價 (P)", min_value=0.0, value=0.0, step=0.5)
 
-if run_btn or stock_input:
-    stock_id = stock_input.strip()
+# --- 5. 核心運算 ---
+if conv_price > 0 and s_price > 0 and cb_price > 0:
+    # 基礎計算
+    parity = (s_price / conv_price) * 100
+    premium = ((cb_price - parity) / parity) * 100
+    implied_s = (cb_price / 100) * conv_price
     
-    with st.spinner(f'正在搜尋 {stock_id} (含上櫃資料庫)...'):
-        
-        # 1. 抓股價
-        price, market_type = get_price_robust(stock_id)
+    # 大戶回本股價 (Break-even Stock Price)
+    # 邏輯：大戶成本價 / 100 * 轉換價
+    breakeven_s = (auction_cost / 100) * conv_price 
 
-        if price:
-            # 顯示標籤
-            tag_html = ""
-            if market_type == "TWO":
-                tag_html = "<span class='tag tag-two'>上櫃 OTC</span>"
-                border_color = "#28a745" # 綠色
-            else:
-                tag_html = "<span class='tag tag-tw'>上市 TWSE</span>"
-                border_color = "#007bff" # 藍色
+    st.markdown("---")
 
-            st.markdown(f"### 📊 {stock_id} {tag_html}", unsafe_allow_html=True)
-            card("目前股價", f"{price} 元", f"資料來源: Yahoo Finance", border_color)
-            
-            # 2. 抓 CB
-            cb_df, cb_source = get_cb_data(stock_id)
-            
-            if cb_df is not None and not cb_df.empty:
-                st.success(f"✅ CB 資料來源：{cb_source}")
-                for idx, row in cb_df.iterrows():
-                    cb_name = row['債券名稱']
-                    try:
-                        raw = str(row['轉換價格']).replace(',', '').replace('*', '')
-                        conv_price = float(raw)
-                    except: conv_price = 0
-                        
-                    if conv_price > 0:
-                        parity = (price / conv_price) * 100
-                        st.markdown("---")
-                        st.subheader(f"🔗 {cb_name}")
-                        
-                        c1, c2 = st.columns(2)
-                        with c1: st.metric("轉換價", f"{conv_price}")
-                        with c2: st.metric("平價", f"{parity:.2f}")
-
-                        fair_val = parity * 1.05
-                        st.info(f"💰 合理買點參考：{fair_val:.1f} 以下")
-                        
-                        target_120 = conv_price * 1.2
-                        st.write(f"📈 目標 120 元 ➔ 現股需漲至 **{target_120:.1f}**")
-            else:
-                # 抓不到 CB 時的備案
-                st.warning("⚠️ 自動抓取 CB 失敗 (IP 限制)")
-                st.markdown("**👇 沒關係，點下方按鈕直接看：**")
-                
-                url_histock = f"https://histock.tw/stock/{stock_id}/%E5%8F%AF%E8%BD%89%E5%82%B5"
-                url_goodinfo = f"https://goodinfo.tw/tw/StockIssuanceCB.asp?STOCK_ID={stock_id}"
-                
-                st.markdown(f"""
-                <a href="{url_histock}" target="_blank" class="fallback-btn">👉 開啟 HiStock (推薦上櫃用)</a>
-                <a href="{url_goodinfo}" target="_blank" class="fallback-btn">👉 開啟 Goodinfo</a>
-                """, unsafe_allow_html=True)
-                
-                with st.expander("🧮 看到價格了？手動算一下"):
-                    u_conv = st.number_input("輸入轉換價", min_value=0.0)
-                    if u_conv > 0:
-                        u_parity = (price / u_conv) * 100
-                        st.metric("平價 (Parity)", f"{u_parity:.2f}")
-
-        else:
-            st.error(f"❌ 找不到代號 {stock_id}。")
-            st.write("如果是剛上櫃的新股，可能資料庫尚未更新。")
+    # === A. 訊號判讀 (通用邏輯) ===
+    # 這裡沿用你的「追高風險教材」邏輯
+    if premium >= 20:
+        status = "🔴 追高風險 (貴)"
+        style = "danger"
+        advice = f"""
+        <b>🔥 溢價 > 20%：危險區！</b><br>
+        CB 價格比理論值貴太多。常見於籌碼過熱。<br>
+        除非現股噴出，否則 CB 回檔速度會很快。建議觀望。
+        """
+    elif 10 <= premium < 20:
+        status = "🟡 中性觀察 (穩)"
+        style = "warning"
+        advice = f"""
+        <b>⚖️ 溢價 10~20%：合理區間。</b><br>
+        這是大多頭市場常見的溢價範圍。<br>
+        若現股強勢，CB 會跟漲；若現股盤整，溢價會慢慢收斂。
+        """
+    elif 5 <= premium < 10:
+        status = "🟢 相對便宜 (安)"
+        style = "safe"
+        advice = f"""
+        <b>💎 溢價 5~10%：高勝率區。</b><br>
+        溢價低，下檔有 Parity 保護。<br>
+        若現股基本面無虞，這裡是長線投資或套利的甜蜜點。
+        """
+    elif premium < 5:
+        status = "❄️ 貼近平價
